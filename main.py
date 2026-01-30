@@ -4,7 +4,6 @@ import json
 import requests
 import os
 import logging
-import pandas as pd
 
 # ==========================================================
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
