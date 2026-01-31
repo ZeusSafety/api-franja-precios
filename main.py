@@ -25,24 +25,25 @@ def get_connection():
         autocommit=True
     )
 
-# --- LISTAR ---
+# --- MÉTODO PARA LISTAR (GET) ---
 def extraer_precios(request, headers):
     mercado = request.args.get("mercado")
     if not mercado:
-        return (json.dumps({"error": "Falta parámetro 'mercado'"}), 400, headers)
+        return (json.dumps({"error": "Falta parámetro 'mercado' en la URL"}), 400, headers)
 
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
+            # Llama al SP de listado
             cursor.execute("CALL ListarProductosPorMercado(%s)", (mercado,))
             registros = cursor.fetchall()
             return (json.dumps(registros, default=str), 200, headers)
     except Exception as e:
-        return (json.dumps({"error": str(e)}), 500, headers)
+        return (json.dumps({"error": f"Error en DB: {str(e)}"}), 500, headers)
     finally:
         conn.close()
 
-# --- INSERTAR, ACTUALIZAR, ELIMINAR ---
+# --- MÉTODOS DE ESCRITURA (POST) ---
 def procesar_post(request, headers):
     metodo = request.args.get("method")
     data = request.get_json(silent=True) or {}
@@ -50,7 +51,7 @@ def procesar_post(request, headers):
 
     try:
         with conn.cursor() as cursor:
-            # 1. ACTUALIZAR
+            # 1. ACTUALIZAR PRECIOS (Corregido el error del paréntesis)
             if metodo == "actualizar_precios_mercado":
                 params = (
                     data.get("mercado"),
@@ -61,11 +62,12 @@ def procesar_post(request, headers):
                     data.get("caja_10"),
                     data.get("caja_20"),
                     data.get("texto_copiar")
-                )
+                ) # <--- Parentesis cerrado correctamente
+                
                 cursor.execute("CALL ActualizarPreciosMercado(%s, %s, %s, %s, %s, %s, %s, %s)", params)
-                return (json.dumps({"success": True, "message": "Precios actualizados"}), 200, headers)
+                return (json.dumps({"success": True, "message": "Precios actualizados exitosamente"}), 200, headers)
 
-            # 2. CREAR (Devuelve el ID generado)
+            # 2. CREAR PRODUCTO BASE (Retorna el ID nuevo)
             elif metodo == "crear_producto_base":
                 sql = """
                     INSERT INTO Productos_franja (Codigo, Producto, Cantidad_En_Caja, ficha_tecnica)
@@ -77,15 +79,16 @@ def procesar_post(request, headers):
                     data.get("cantidad_caja"),
                     data.get("ficha_tecnica")
                 ))
-                nuevo_id = cursor.lastrowid # <--- Aquí obtienes el ID que pedías
-                return (json.dumps({"success": True, "id": nuevo_id, "message": "Producto creado"}), 201, headers)
+                nuevo_id = cursor.lastrowid
+                return (json.dumps({"success": True, "id": nuevo_id, "message": "Producto base creado"}), 201, headers)
 
-            # 3. ELIMINAR (Mejorado para validar existencia)
+            # 3. ELIMINAR PRODUCTO (Valida si realmente existía)
             elif metodo == "eliminar_producto":
                 identificador = data.get("id") or data.get("codigo")
                 if not identificador:
-                    return (json.dumps({"error": "Falta id o codigo"}), 400, headers)
+                    return (json.dumps({"error": "Falta id o codigo para eliminar"}), 400, headers)
                 
+                # Detecta si es ID numérico o Código de texto
                 if str(identificador).isdigit():
                     sql = "DELETE FROM Productos_franja WHERE id = %s"
                 else:
@@ -93,45 +96,49 @@ def procesar_post(request, headers):
                 
                 cursor.execute(sql, (identificador,))
                 
-                # VERIFICACIÓN DE FILAS AFECTADAS
                 if cursor.rowcount == 0:
-                    return (json.dumps({
-                        "success": False, 
-                        "message": f"No se encontró ningún producto con el identificador: {identificador}"
-                    }), 404, headers)
-                else:
-                    return (json.dumps({
-                        "success": True, 
-                        "message": f"Producto {identificador} eliminado correctamente"
-                    }), 200, headers)
+                    return (json.dumps({"success": False, "message": f"No se encontró nada con: {identificador}"}), 404, headers)
+                
+                return (json.dumps({"success": True, "message": f"Eliminado correctamente: {identificador}"}), 200, headers)
 
-# --- ENTRY POINT ---
+            return (json.dumps({"error": f"Método '{metodo}' no es válido"}), 404, headers)
+
+    except Exception as e:
+        logging.error(f"Error en POST: {str(e)}")
+        return (json.dumps({"error": str(e)}), 500, headers)
+    finally:
+        conn.close()
+
+# --- ENTRY POINT PRINCIPAL ---
 @functions_framework.http
 def crud_franja_precios(request):
+    # Configuración de CORS
     headers = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization"
     }
 
+    # Responder a Preflight de Navegadores
     if request.method == "OPTIONS":
         return ("", 204, headers)
 
+    # Validación de Seguridad (Token)
     auth_header = request.headers.get("Authorization")
     if not auth_header:
-        return (json.dumps({"error": "No token"}), 401, headers)
+        return (json.dumps({"error": "No se proporcionó Token de acceso"}), 401, headers)
 
-    # Validación de Token
     try:
         val_resp = requests.post(API_TOKEN, headers={"Authorization": auth_header}, timeout=10)
         if val_resp.status_code != 200:
-            return (json.dumps({"error": "Token inválido"}), 401, headers)
-    except:
-        return (json.dumps({"error": "Error de autenticacion"}), 503, headers)
+            return (json.dumps({"error": "Token inválido o expirado"}), 401, headers)
+    except Exception as e:
+        return (json.dumps({"error": f"Fallo servicio de autenticación: {str(e)}"}), 503, headers)
 
+    # Ruteo de Métodos
     if request.method == "GET":
         return extraer_precios(request, headers)
     elif request.method == "POST":
         return procesar_post(request, headers)
     
-    return (json.dumps({"error": "Metodo no permitido"}), 405, headers)
+    return (json.dumps({"error": "Método HTTP no soportado"}), 405, headers)
