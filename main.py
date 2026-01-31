@@ -80,27 +80,30 @@ def procesar_post(request, headers):
                 nuevo_id = cursor.lastrowid # <--- Aquí obtienes el ID que pedías
                 return (json.dumps({"success": True, "id": nuevo_id, "message": "Producto creado"}), 201, headers)
 
-            # 3. ELIMINAR (Por ID o por Código)
+            # 3. ELIMINAR (Mejorado para validar existencia)
             elif metodo == "eliminar_producto":
                 identificador = data.get("id") or data.get("codigo")
                 if not identificador:
                     return (json.dumps({"error": "Falta id o codigo"}), 400, headers)
                 
-                # Si el identificador es número, borra por id, si es texto, por Codigo
                 if str(identificador).isdigit():
                     sql = "DELETE FROM Productos_franja WHERE id = %s"
                 else:
                     sql = "DELETE FROM Productos_franja WHERE Codigo = %s"
                 
                 cursor.execute(sql, (identificador,))
-                return (json.dumps({"success": True, "message": f"Eliminado: {identificador}"}), 200, headers)
-
-            return (json.dumps({"error": f"Metodo {metodo} no reconocido"}), 404, headers)
-
-    except Exception as e:
-        return (json.dumps({"error": str(e)}), 500, headers)
-    finally:
-        conn.close()
+                
+                # VERIFICACIÓN DE FILAS AFECTADAS
+                if cursor.rowcount == 0:
+                    return (json.dumps({
+                        "success": False, 
+                        "message": f"No se encontró ningún producto con el identificador: {identificador}"
+                    }), 404, headers)
+                else:
+                    return (json.dumps({
+                        "success": True, 
+                        "message": f"Producto {identificador} eliminado correctamente"
+                    }), 200, headers)
 
 # --- ENTRY POINT ---
 @functions_framework.http
