@@ -6,17 +6,16 @@ import os
 import logging
 
 # ==========================================================
-# CONFIGURACIÓN Y VARIABLES DE ENTORNO
+# CONFIGURACIÓN (Zeus Safety Standard)
 # ==========================================================
-# Se obtienen de las variables de entorno de la Cloud Function
-DB_USER = os.getenv("DB_USER", "zeussafety-2024")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "ZeusSafety2025")
-DB_NAME = os.getenv("DB_NAME", "Zeus_Safety_Data_Integration")
-INSTANCE_CONNECTION_NAME = os.getenv("INSTANCE_CONNECTION_NAME", "stable-smithy-435414-m6:us-central1:zeussafety-2024")
+DB_USER = "zeussafety-2024"
+DB_PASSWORD = "ZeusSafety2025"
+DB_NAME = "Zeus_Safety_Data_Integration"
+INSTANCE_CONNECTION_NAME = "stable-smithy-435414-m6:us-central1:zeussafety-2024"
 API_TOKEN = "https://api-verificacion-token-2946605267.us-central1.run.app"
 
 def get_connection():
-    """Establece conexión con Cloud SQL vía Unix Socket (estándar Zeus)"""
+    """Establece conexión con Cloud SQL"""
     return pymysql.connect(
         user=DB_USER,
         password=DB_PASSWORD,
@@ -26,9 +25,7 @@ def get_connection():
         autocommit=True
     )
 
-# ==========================================================
-# HANDLER PARA GET (LISTAR POR MERCADO)
-# ==========================================================
+# --- LISTAR ---
 def extraer_precios(request, headers):
     mercado = request.args.get("mercado")
     if not mercado:
@@ -37,19 +34,15 @@ def extraer_precios(request, headers):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Llama al procedimiento almacenado de listado
             cursor.execute("CALL ListarProductosPorMercado(%s)", (mercado,))
             registros = cursor.fetchall()
             return (json.dumps(registros, default=str), 200, headers)
     except Exception as e:
-        logging.error(f"Error en extraer_precios: {e}")
         return (json.dumps({"error": str(e)}), 500, headers)
     finally:
         conn.close()
 
-# ==========================================================
-# HANDLER PARA POST (INSERTAR / ACTUALIZAR)
-# ==========================================================
+# --- INSERTAR, ACTUALIZAR, ELIMINAR ---
 def procesar_post(request, headers):
     metodo = request.args.get("method")
     data = request.get_json(silent=True) or {}
@@ -57,7 +50,7 @@ def procesar_post(request, headers):
 
     try:
         with conn.cursor() as cursor:
-            # CASO A: ACTUALIZAR PRECIOS (Lógica Upsert)
+            # 1. ACTUALIZAR
             if metodo == "actualizar_precios_mercado":
                 params = (
                     data.get("mercado"),
@@ -67,12 +60,12 @@ def procesar_post(request, headers):
                     data.get("caja_5"),
                     data.get("caja_10"),
                     data.get("caja_20"),
-                    data.get("texto_copiar") # Puede ser None para activar el Trigger
+                    data.get("texto_copiar")
                 )
                 cursor.execute("CALL ActualizarPreciosMercado(%s, %s, %s, %s, %s, %s, %s, %s)", params)
                 return (json.dumps({"success": True, "message": "Precios actualizados"}), 200, headers)
 
-            # CASO B: CREAR PRODUCTO BASE
+            # 2. CREAR (Devuelve el ID generado)
             elif metodo == "crear_producto_base":
                 sql = """
                     INSERT INTO Productos_franja (Codigo, Producto, Cantidad_En_Caja, ficha_tecnica)
@@ -84,20 +77,32 @@ def procesar_post(request, headers):
                     data.get("cantidad_caja"),
                     data.get("ficha_tecnica")
                 ))
-                # Tu TRIGGER 'despues_insertar_producto' se encarga del resto
-                return (json.dumps({"success": True, "message": "Producto base creado"}), 201, headers)
+                nuevo_id = cursor.lastrowid # <--- Aquí obtienes el ID que pedías
+                return (json.dumps({"success": True, "id": nuevo_id, "message": "Producto creado"}), 201, headers)
 
-            return (json.dumps({"error": "Método POST no reconocido"}), 404, headers)
+            # 3. ELIMINAR (Por ID o por Código)
+            elif metodo == "eliminar_producto":
+                identificador = data.get("id") or data.get("codigo")
+                if not identificador:
+                    return (json.dumps({"error": "Falta id o codigo"}), 400, headers)
+                
+                # Si el identificador es número, borra por id, si es texto, por Codigo
+                if str(identificador).isdigit():
+                    sql = "DELETE FROM Productos_franja WHERE id = %s"
+                else:
+                    sql = "DELETE FROM Productos_franja WHERE Codigo = %s"
+                
+                cursor.execute(sql, (identificador,))
+                return (json.dumps({"success": True, "message": f"Eliminado: {identificador}"}), 200, headers)
+
+            return (json.dumps({"error": f"Metodo {metodo} no reconocido"}), 404, headers)
 
     except Exception as e:
-        logging.error(f"Error en procesar_post: {e}")
         return (json.dumps({"error": str(e)}), 500, headers)
     finally:
         conn.close()
 
-# ==========================================================
-# FUNCIÓN PRINCIPAL (ENTRY POINT)
-# ==========================================================
+# --- ENTRY POINT ---
 @functions_framework.http
 def crud_franja_precios(request):
     headers = {
@@ -109,22 +114,21 @@ def crud_franja_precios(request):
     if request.method == "OPTIONS":
         return ("", 204, headers)
 
-    # Autenticación Zeus
     auth_header = request.headers.get("Authorization")
     if not auth_header:
         return (json.dumps({"error": "No token"}), 401, headers)
 
+    # Validación de Token
     try:
         val_resp = requests.post(API_TOKEN, headers={"Authorization": auth_header}, timeout=10)
         if val_resp.status_code != 200:
             return (json.dumps({"error": "Token inválido"}), 401, headers)
-    except Exception as e:
-        return (json.dumps({"error": f"Error auth: {str(e)}"}), 503, headers)
+    except:
+        return (json.dumps({"error": "Error de autenticacion"}), 503, headers)
 
-    # Enrutamiento
     if request.method == "GET":
         return extraer_precios(request, headers)
     elif request.method == "POST":
         return procesar_post(request, headers)
     
-    return (json.dumps({"error": "Method Not Allowed"}), 405, headers)
+    return (json.dumps({"error": "Metodo no permitido"}), 405, headers)
